@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+
+import argparse
+import yaml
+import os
+import re
+from collections import defaultdict
+
+import argparse
+
+def load_file(file_name, multi=False):
+    if (file_name.endswith(".cs")):
+        file_name = "%s.meta" % file_name
+
+    with (open(file_name, 'r')) as f:
+        s = f.read()
+        if multi:
+            lines = re.split("---", s)
+            # Filter out the top part
+            lines = [line for line in lines if not line.startswith("%YAML")]
+            if not multi and len(lines) > 1:
+                raise Exception("Multi document file found but multi=False.")
+            documents = {}
+            for line in lines:
+                file_id_regex = r"!u!\d+ &(\d+)(?: stripped)?"
+                file_id = re.search(file_id_regex, line)
+                if not file_id and multi:
+                    raise Exception("Non-multi document passed with multi=True")
+                line = re.sub(file_id_regex, "", line).strip()
+                if file_id:
+                    file_id = file_id[1]
+                doc = yaml.load(line)
+                doc['%file_id'] = file_id
+                documents[file_id] = doc
+            return documents
+        else:
+            return yaml.load(s)
+
+def get_class_guid(file_name):
+    y = load_file(file_name)
+    try:
+        return y['guid']
+    except KeyError:
+        raise Exception("Couldn't find guid for file %s" % file_name)
+
+def find_guids_in_map(filename, guid, prefabs):
+    prefabs_by_guid = {p['guid']: p for p in prefabs}
+
+    freestanding_hits = 0
+    prefabs = defaultdict(int)
+
+    for component in load_file(filename, multi=True).values():
+        if 'MonoBehaviour' in component:
+            if component.get("MonoBehaviour")['m_Script']['guid'] == guid:
+                freestanding_hits += 1
+        if 'Prefab' in component:
+            prefab_guid = component.get("Prefab")['m_ParentPrefab']['guid']
+            if prefab_guid in prefabs_by_guid:
+                name = prefabs_by_guid[prefab_guid]['name']
+                prefabs[name] += 1
+    if freestanding_hits > 0:
+        print("%s: %s instances of component in GameObjects" % (filename, freestanding_hits))
+    if prefabs:
+        for name, count in prefabs.items():
+            print("%s: %s instance of prefab \"%s\"" % (filename, count, name))
+
+
+def find_guid_in_prefab(filename, guid):
+    hit = False
+    for component in load_file(filename, multi=True).values():
+        if 'MonoBehaviour' in component:
+            if component.get('MonoBehaviour')['m_Script']['guid'] == guid:
+                hit = True
+                print("Prefab: %s" % filename)
+    return hit
+
+def get_prefab_guid(filename):
+    prefab = load_file(filename, multi=False)
+    return prefab['guid']
+
+def search(class_file, project_root):
+    guid = get_class_guid(class_file)
+    print("Guid of class: %s" % guid)
+
+    # Scan prefabs
+    prefabs = []
+    for root, dirs, files in os.walk(project_root):
+        for f in files:
+            full_path = os.path.join(root, f)
+            if f.endswith('.prefab'):
+                hit = find_guid_in_prefab(full_path, guid)
+                if hit:
+                    prefab_guid = get_prefab_guid('%s.meta' % full_path)
+                    prefab = {'guid': prefab_guid, 'name': f}
+                    prefabs.append(prefab)
+
+    for root, dirs, files in os.walk(project_root):
+        for f in files:
+            full_path = os.path.join(root, f)
+            if f.endswith('.unity'):
+                find_guids_in_map(full_path, guid, prefabs)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Find instances of classes in your unity project')
+    parser.add_argument('--class-file', '-c', dest='class_file', help='In which file is the class located?')
+    parser.add_argument('--directory', '-d', dest='project_root', help='Where do you want to look for usages?')
+
+    args = parser.parse_args()
+    search(args.class_file, args.project_root)
